@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 豆包 AI 视频生成脚本
-用法: python3 generate_video.py "视频描述" [输出目录]
+用法: python3 generate_video.py "视频描述" [输出目录] [参考图目录]
 """
 
 import subprocess, json, sys, time, os, re, http.client, urllib.request
@@ -9,6 +9,7 @@ import subprocess, json, sys, time, os, re, http.client, urllib.request
 CDP_HOST, CDP_PORT = '127.0.0.1', 9222
 PROMPT = sys.argv[1] if len(sys.argv) > 1 else None
 OUTPUT_DIR = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2 else '~/doubao/videos')
+REF_IMAGES_DIR = os.path.expanduser(sys.argv[3] if len(sys.argv) > 3 else '') if len(sys.argv) > 3 else ''
 
 if not PROMPT:
     print('用法: python3 generate_video.py "视频描述" [输出目录]')
@@ -160,6 +161,164 @@ def wait_for_video():
     
     return None
 
+def click_ref_images_button():
+    """点击参考图按钮"""
+    js = '''
+        (function() {
+            // 尝试多种方式找参考图按钮
+            var selectors = [
+                'button:has-text("参考图")',
+                '[class*="ref-image"]',
+                '[class*="reference-image"]',
+                '[class*="upload"]'
+            ];
+
+            var btns = document.querySelectorAll("button, div[role='button']");
+            for (var btn of btns) {
+                var txt = btn.textContent.trim();
+                if (txt === "参考图" || txt.includes("参考图")) {
+                    btn.scrollIntoView({block: "center"});
+                    btn.click();
+                    return "clicked: " + txt;
+                }
+            }
+
+            // 尝试找图片上传相关的按钮
+            var uploadArea = document.querySelector('[class*="upload"], [class*="image-upload"], [class*="ref"]');
+            if (uploadArea) {
+                uploadArea.click();
+                return "clicked upload area";
+            }
+
+            return "not found";
+        })()
+    '''
+    result = cdp_js(js)
+    print(f'   参考图按钮点击: {result}')
+    return result
+
+def upload_ref_image(image_path):
+    """上传单张参考图 - 使用 CDP DOM.setFileInputFiles"""
+    import asyncio, websockets
+
+    try:
+        c = http.client.HTTPConnection(CDP_HOST, CDP_PORT, timeout=5)
+        c.request('GET', '/json/list')
+        pages = json.loads(c.getresponse().read()); c.close()
+        ws_url = next((p['webSocketDebuggerUrl'] for p in pages if p.get('type') == 'page'), pages[0]['webSocketDebuggerUrl'])
+
+        async def do():
+            nonlocal ws_url
+            ws = await asyncio.wait_for(websockets.connect(ws_url), timeout=10)
+            mid = 1
+            async def send(m, p=None):
+                nonlocal mid
+                await ws.send(json.dumps({'id': mid, 'method': m, 'params': p or {}})); mid += 1
+                while True:
+                    r = await asyncio.wait_for(ws.recv(), timeout=5)
+                    d = json.loads(r)
+                    if d.get('id') == mid - 1: return d
+
+            # 获取 DOM 文档
+            doc = await send('DOM.getDocument', {'depth': 0})
+            root_id = doc.get('result', {}).get('root', {}).get('nodeId', 0)
+            if not root_id:
+                await ws.close()
+                return {'error': 'no root nodeId'}
+
+            # 查找 file input 的 backend node ID
+            result = await send('DOM.querySelectorAll', {
+                'nodeId': root_id,
+                'selector': 'input[type="file"]'
+            })
+            node_ids = result.get('result', {}).get('nodeIds', [])
+            if not node_ids:
+                await ws.close()
+                return {'error': 'no file input found'}
+
+            file_input_node_id = node_ids[0]
+
+            # 使用绝对路径
+            abs_path = os.path.abspath(image_path)
+
+            # 设置文件
+            set_result = await send('DOM.setFileInputFiles', {
+                'files': [abs_path],
+                'nodeId': file_input_node_id
+            })
+            await ws.close()
+            return set_result
+
+        result = asyncio.run(do())
+        if result and 'error' not in str(result):
+            return True
+        print(f'   上传结果: {result}')
+        return False
+    except Exception as e:
+        print(f'   上传出错: {e}')
+        return False
+
+def get_image_files(directory):
+    """获取目录中的所有图片文件"""
+    if not directory or not os.path.isdir(directory):
+        return []
+
+    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
+    image_files = []
+
+    for filename in os.listdir(directory):
+        ext = os.path.splitext(filename.lower())[1]
+        if ext in image_extensions:
+            full_path = os.path.join(directory, filename)
+            if os.path.isfile(full_path):
+                image_files.append(full_path)
+
+    return sorted(image_files)
+
+def upload_ref_images():
+    """上传所有参考图"""
+    if not REF_IMAGES_DIR:
+        return
+
+    image_files = get_image_files(REF_IMAGES_DIR)
+    if not image_files:
+        print(f'⚠️ 参考图目录为空或不存在: {REF_IMAGES_DIR}')
+        return
+
+    print(f'📷 开始上传 {len(image_files)} 张参考图...')
+
+    for i, image_path in enumerate(image_files, 1):
+        print(f'   [{i}/{len(image_files)}] 上传: {os.path.basename(image_path)}')
+
+        # 点击参考图按钮
+        result = click_ref_images_button()
+        if 'not found' in result:
+            # 尝试截图看看页面状态
+            print(f'   ⚠️ 未找到参考图按钮，尝试截图诊断...')
+            run(f'screenshot /tmp/ref_btn_debug_{int(time.time())}.png', timeout=5)
+            continue
+
+        # 等待文件输入框出现
+        print(f'   等待文件选择框...')
+        time.sleep(2)
+
+        # 检查 file input 是否存在
+        check = cdp_js('''
+            (function() {
+                var inputs = document.querySelectorAll('input[type="file"]');
+                return "found " + inputs.length + " file inputs";
+            })()
+        ''')
+        print(f'   文件输入框状态: {check}')
+
+        # 上传图片
+        if upload_ref_image(image_path):
+            print(f'   ✅ 上传成功')
+        else:
+            print(f'   ❌ 上传失败')
+
+        time.sleep(2)
+
 def main():
     print('🔧 检查 Chrome...')
     if not check_chrome():
@@ -193,6 +352,12 @@ def main():
         print('❌ 未找到视频描述输入框'); sys.exit(1)
 
     print(f'   视频输入框 @{ta_ref}')
+
+    # 上传参考图（在填写提示词之前）
+    if REF_IMAGES_DIR:
+        print(f'📁 参考图目录: {REF_IMAGES_DIR}')
+        upload_ref_images()
+        time.sleep(2)
 
     print(f'✍️ 填写: {PROMPT}')
     run(f'fill @{ta_ref} "{PROMPT}"', timeout=5)
