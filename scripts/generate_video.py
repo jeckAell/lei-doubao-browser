@@ -35,16 +35,20 @@ def run(cmd, timeout=12):
         return ''
 
 def find_ref(text, kw):
-    """通过文本找 ref，优先匹配 textbox"""
+    """通过文本找 ref，优先找 link 类型"""
+    best = None
     for line in text.split('\n'):
-        if f'textbox' in line and kw in line:
-            m = re.search(r'ref=(e\d+)', line)
-            if m: return m.group(1)
-    for line in text.split('\n'):
-        if kw in line:
-            m = re.search(r'ref=(e\d+)', line)
-            if m: return m.group(1)
-    return None
+        if f'"{kw}"' not in line and kw not in line:
+            continue
+        m = re.search(r'ref=(e\d+)', line)
+        if not m:
+            continue
+        ref = m.group(1)
+        if 'link "' in line:
+            return ref
+        if not best:
+            best = ref
+    return best
 
 def cdp_js(js):
     try:
@@ -166,28 +170,52 @@ def main():
     run('open "https://www.doubao.com/"', timeout=10)
     time.sleep(3)
 
-    print('🎬 进入视频生成模式...')
-    
-    # 通过 JS 点击"视频生成"按钮
-    r = click_element_by_text('视频生成')
-    print(f'   {r}')
+    print('🎨 进入 AI 创作页面...')
+    snap = run('snapshot -i', timeout=8)
+    ai_ref = find_ref(snap, 'AI 创作')
+    if ai_ref:
+        run(f'click @{ai_ref}', timeout=8)
     time.sleep(4)
+
+    print('🎬 进入视频生成模式...')
+    snap = run('snapshot -i', timeout=8)
+    video_ref = find_ref(snap, '视频')
+    if video_ref:
+        run(f'click @{video_ref}', timeout=8)
+        print(f'   点击视频 @{video_ref}')
+    time.sleep(3)
 
     # 找视频输入框
     snap = run('snapshot -i', timeout=8)
     ta_ref = find_ref(snap, '添加照片，描述你想生成的视频')
-    
+
     if not ta_ref:
         print('❌ 未找到视频描述输入框'); sys.exit(1)
-    
+
     print(f'   视频输入框 @{ta_ref}')
 
     print(f'✍️ 填写: {PROMPT}')
     run(f'fill @{ta_ref} "{PROMPT}"', timeout=5)
-    time.sleep(0.5)
+    time.sleep(1)
 
-    print('🚀 提交生成...')
-    run('press Enter', timeout=5)
+    print('🚀 点击发送按钮...')
+    cdp_js('''
+        (function() {
+            var btn = document.querySelector('[class*="send-btn-wrapper"]');
+            if (!btn) return 'not found';
+            var rect = btn.getBoundingClientRect();
+            var x = rect.left + rect.width / 2;
+            var y = rect.top + rect.height / 2;
+            var dispatch = function(x, y, type) {
+                var evt = new MouseEvent(type, {bubbles: true, cancelable: true, clientX: x, clientY: y, view: window});
+                document.elementFromPoint(x, y).dispatchEvent(evt);
+            };
+            dispatch(x, y, 'mousedown');
+            dispatch(x, y, 'mouseup');
+            dispatch(x, y, 'click');
+            return 'clicked at ' + Math.round(x) + ',' + Math.round(y);
+        })()
+    ''')
 
     # 等待视频生成
     video_url = wait_for_video()
