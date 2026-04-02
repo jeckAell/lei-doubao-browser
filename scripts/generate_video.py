@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""
+豆包 AI 视频生成脚本
+用法: python3 generate_video.py "视频描述" [输出目录]
+"""
+
+import subprocess, json, sys, time, os, re, http.client, urllib.request
+
+CDP_HOST, CDP_PORT = '127.0.0.1', 9222
+PROMPT = sys.argv[1] if len(sys.argv) > 1 else None
+OUTPUT_DIR = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2 else '~/doubao/videos')
+
+if not PROMPT:
+    print('用法: python3 generate_video.py "视频描述" [输出目录]')
+    sys.exit(1)
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+print(f'📁 输出目录: {OUTPUT_DIR}')
+
+def check_chrome():
+    try:
+        c = http.client.HTTPConnection(CDP_HOST, CDP_PORT, timeout=3)
+        c.request('GET', '/json/version')
+        c.getresponse().read(); c.close()
+        return True
+    except:
+        return False
+
+def run(cmd, timeout=12):
+    try:
+        r = subprocess.run(f'agent-browser {cmd}', shell=True,
+                         capture_output=True, text=True, timeout=timeout)
+        return r.stdout + r.stderr
+    except subprocess.TimeoutExpired:
+        return ''
+
+def find_ref(text, kw):
+    """通过文本找 ref，优先匹配 textbox"""
+    for line in text.split('\n'):
+        if f'textbox' in line and kw in line:
+            m = re.search(r'ref=(e\d+)', line)
+            if m: return m.group(1)
+    for line in text.split('\n'):
+        if kw in line:
+            m = re.search(r'ref=(e\d+)', line)
+            if m: return m.group(1)
+    return None
+
+def cdp_js(js):
+    try:
+        c = http.client.HTTPConnection(CDP_HOST, CDP_PORT, timeout=5)
+        c.request('GET', '/json/list')
+        pages = json.loads(c.getresponse().read()); c.close()
+        ws_url = next((p['webSocketDebuggerUrl'] for p in pages if p.get('type') == 'page'), pages[0]['webSocketDebuggerUrl'])
+        import asyncio, websockets
+        async def do():
+            ws = await asyncio.wait_for(websockets.connect(ws_url), timeout=10)
+            mid = 1
+            async def send(m, p=None):
+                nonlocal mid
+                await ws.send(json.dumps({'id': mid, 'method': m, 'params': p or {}})); mid += 1
+                while True:
+                    r = await asyncio.wait_for(ws.recv(), timeout=5)
+                    d = json.loads(r)
+                    if d.get('id') == mid - 1: return d
+            rv = await send('Runtime.evaluate', {'expression': js, 'returnByValue': True})
+            await ws.close()
+            return rv.get('result',{}).get('result',{}).get('value','') or ''
+        return asyncio.run(do())
+    except Exception as e:
+        return f'error:{e}'
+
+def download_video(url, path):
+    try:
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+            'Referer': 'https://www.doubao.com/',
+            'Accept': '*/*'
+        })
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            total = int(resp.headers.get('Content-Length', 0))
+            downloaded = 0
+            chunk_size = 65536
+            with open(path, 'wb') as f:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk: break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+            return downloaded
+    except Exception as e:
+        return f'error: {e}'
+
+def click_element_by_text(kw):
+    """通过 JS 点击包含指定文本的元素"""
+    js = f'''
+        (function() {{
+            var els = document.querySelectorAll("button, a, [role=\\'button\\']");
+            for (var el of els) {{
+                if (el.textContent.trim() === "{kw}") {{
+                    el.scrollIntoView({{block: "center"}});
+                    el.click();
+                    return "clicked";
+                }}
+            }}
+            return "not found";
+        }})()
+    '''
+    return cdp_js(js)
+
+def wait_for_video():
+    """等待视频生成完成，返回视频URL"""
+    print('⏳ 等待视频生成（最多 180 秒）...')
+    start = time.time()
+    
+    while time.time() - start < 180:
+        elapsed = int(time.time() - start)
+        
+        status = cdp_js('''
+            (function() {
+                var txt = document.body.innerText || "";
+                if (txt.includes("视频生成好啦") || txt.includes("你的视频生成好啦")) return "ready";
+                return "waiting";
+            })()
+        ''')
+        
+        if 'ready' in status:
+            print(f'   ✅ 视频生成完成，耗时 {elapsed} 秒')
+            time.sleep(1)
+            
+            # 点击播放按钮
+            cdp_js('''
+                (function() {
+                    var playBtn = document.querySelector("[class*=\'play-icon\']");
+                    if (playBtn) playBtn.click();
+                })()
+            ''')
+            time.sleep(2)
+            
+            # 提取视频 URL
+            for _ in range(5):
+                url = cdp_js('''
+                    (function() {
+                        var video = document.querySelector("video");
+                        if (video && video.src && video.src.includes("douyinvod")) return video.src;
+                        return "no video yet";
+                    })()
+                ''')
+                if url and 'douyinvod' in url:
+                    return url
+                time.sleep(1)
+            return url
+        
+        print(f'   {elapsed}s: 等待中...')
+        time.sleep(10)
+    
+    return None
+
+def main():
+    print('🔧 检查 Chrome...')
+    if not check_chrome():
+        print('❌ Chrome Debug 未启动，请先运行 start.sh'); sys.exit(1)
+    print('✅ Chrome 运行中')
+
+    print('🌐 打开豆包...')
+    run('open "https://www.doubao.com/"', timeout=10)
+    time.sleep(3)
+
+    print('🎬 进入视频生成模式...')
+    
+    # 通过 JS 点击"视频生成"按钮
+    r = click_element_by_text('视频生成')
+    print(f'   {r}')
+    time.sleep(4)
+
+    # 找视频输入框
+    snap = run('snapshot -i', timeout=8)
+    ta_ref = find_ref(snap, '添加照片，描述你想生成的视频')
+    
+    if not ta_ref:
+        print('❌ 未找到视频描述输入框'); sys.exit(1)
+    
+    print(f'   视频输入框 @{ta_ref}')
+
+    print(f'✍️ 填写: {PROMPT}')
+    run(f'fill @{ta_ref} "{PROMPT}"', timeout=5)
+    time.sleep(0.5)
+
+    print('🚀 提交生成...')
+    run('press Enter', timeout=5)
+
+    # 等待视频生成
+    video_url = wait_for_video()
+    
+    if not video_url or 'no video' in str(video_url) or 'error' in str(video_url):
+        print(f'❌ 视频获取失败: {video_url}')
+        run(f'screenshot {OUTPUT_DIR}/fail_{int(time.time())}.png', timeout=10)
+        sys.exit(1)
+
+    # 下载视频
+    safe = re.sub(r'[^\w\u4e00-\u9fff\s]', '', PROMPT).strip()[:20] or 'video'
+    ts = int(time.time())
+    filename = f'{safe}_{ts}.mp4'
+    filepath = f'{OUTPUT_DIR}/{filename}'
+    
+    print(f'📥 下载视频...')
+    size = download_video(video_url, filepath)
+    
+    if isinstance(size, int):
+        print(f'   ✅ {size//1024//1024}MB → {filename}')
+    else:
+        print(f'   ❌ {size}')
+        sys.exit(1)
+
+    print()
+    print('=' * 40)
+    print(f'✅ 完成！')
+    print(f'📁 {filepath}')
+    print(f'📝 {PROMPT}')
+    print('=' * 40)
+
+if __name__ == '__main__':
+    main()
