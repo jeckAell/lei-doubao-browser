@@ -161,6 +161,61 @@ def wait_for_video():
     
     return None
 
+def click_video_tab_button():
+    """点击视频 tab 按钮（与图片按钮同组的那一个）"""
+    js = '''
+        (function() {
+            // 查找同时包含"图片"和"视频"的父容器（tab组）
+            var allButtons = document.querySelectorAll("button, div[role='tab'], div[role='button']");
+
+            for (var btn of allButtons) {
+                var txt = btn.textContent.trim();
+                // 精确匹配"视频"按钮（排除历史记录等干扰项）
+                if (txt === "视频" || txt === "图片/视频") {
+                    btn.scrollIntoView({block: "center"});
+                    btn.click();
+                    return "clicked: " + txt;
+                }
+            }
+
+            // 方案2：找包含"图片"和"视频"两个子元素的父容器
+            var tabs = document.querySelectorAll('[role="tab"], [class*="tab"]');
+            for (var tab of tabs) {
+                var children = tab.querySelectorAll("button, span, div");
+                var hasImage = false, hasVideo = false;
+                for (var child of children) {
+                    var t = child.textContent.trim();
+                    if (t === "图片") hasImage = true;
+                    if (t === "视频") hasVideo = true;
+                }
+                if (hasImage && hasVideo) {
+                    // 在这个tab组内找视频按钮
+                    var videoBtn = Array.from(children).find(c => c.textContent.trim() === "视频");
+                    if (videoBtn) {
+                        videoBtn.scrollIntoView({block: "center"});
+                        videoBtn.click();
+                        return "clicked video in tab group";
+                    }
+                }
+            }
+
+            // 方案3：查找文字为"视频"且是tab类型的元素
+            var tabButtons = document.querySelectorAll('[role="tab"]');
+            for (var tb of tabButtons) {
+                if (tb.textContent.trim() === "视频") {
+                    tb.scrollIntoView({block: "center"});
+                    tb.click();
+                    return "clicked role=tab video";
+                }
+            }
+
+            return "not found";
+        })()
+    '''
+    result = cdp_js(js)
+    print(f'   视频tab按钮点击: {result}')
+    return result
+
 def click_ref_images_button():
     """点击参考图按钮"""
     js = '''
@@ -337,11 +392,7 @@ def main():
     time.sleep(4)
 
     print('🎬 进入视频生成模式...')
-    snap = run('snapshot -i', timeout=8)
-    video_ref = find_ref(snap, '视频')
-    if video_ref:
-        run(f'click @{video_ref}', timeout=8)
-        print(f'   点击视频 @{video_ref}')
+    click_video_tab_button()
     time.sleep(3)
 
     # 找视频输入框
