@@ -17,7 +17,7 @@ if not USER_INPUT:
     print('用法: python3 analyze_video.py "抖音视频链接或分享内容"')
     sys.exit(1)
 
-EXTRA_PROMPT = "解析视频，分析出视频脚本、视频特点、爆火原因"
+EXTRA_PROMPT = "解析视频，分析出视频脚本、视频特点、爆火原因，并为这个视频起一个简短有吸引力的标题。回复最后请以【标题: xxx】和【分类: xxx】格式标注视频标题和所属分区（如【标题: 这条视频为什么爆火】）【分类: 搞笑】"
 
 def check_chrome():
     try:
@@ -86,6 +86,29 @@ def extract_douyin_url(text):
             return m.group(0)
     return None
 
+def extract_title_from_input(text):
+    """从分享内容中提取标题（通常在#标签或链接之前的中文内容）"""
+    # 去掉链接部分
+    text_without_url = re.sub(r'https?://\S+', '', text)
+    # 去掉复制提示
+    text_without_url = re.sub(r'复制此链接.*', '', text_without_url)
+    # 去掉 # 标签（整块去除）
+    text_without_tags = re.sub(r'#\S*', '', text_without_url)
+    # 清理多余空白
+    text_cleaned = re.sub(r'\s+', ' ', text_without_tags).strip()
+    # 去掉开头的抖音格式信息如 "6.94 Syt:/ 07/04 a@N.Jv"
+    text_cleaned = re.sub(r'^[\d.]+\s*Syt:.*?@\S+\s*', '', text_cleaned)
+    # 去掉开头和结尾的 #残留和空白
+    text_cleaned = text_cleaned.strip(' #')
+    # 提取中文句子作为标题（排除含 # 的行）
+    lines = text_cleaned.split(' ')
+    for line in lines:
+        line = line.strip()
+        # 找第一个超过5个字符的中文句子，且不含 #
+        if len(line) > 5 and re.search(r'[\u4e00-\u9fff]', line) and '#' not in line:
+            return line
+    return ''
+
 def load_scripts():
     if not os.path.exists(SCRIPTS_FILE):
         return []
@@ -101,39 +124,67 @@ def save_scripts(scripts):
         json.dump(scripts, f, ensure_ascii=False, indent=2)
 
 def get_ai_response():
-    """从 window._ROUTER_DATA 提取 AI 回复"""
+    """从 DOM 元素 class='flow-markdown-body' 提取 AI 回复"""
     result = cdp_js('''
         (function() {
-            try {
-                var data = window._ROUTER_DATA;
-                if (!data) return "";
-                var str = JSON.stringify(data);
-                var idx = str.indexOf("\\"text\\":\\"");
-                if (idx < 0) return "";
-                var start = idx + 9;
-                var end = start;
-                while (end < str.length) {
-                    if (str.charAt(end) === "\\"" && str.charAt(end-1) !== "\\\\") break;
-                    end++;
-                }
-                return str.substring(start, end);
-            } catch(e) { return "error:" + e.message; }
+            var el = document.querySelector('[class*="flow-markdown-body"]');
+            if (!el) return "";
+            return el.innerText || el.textContent || "";
         })()
     ''')
-    if result and len(result) > 50 and not result.startswith('error'):
+    if result and len(result) > 50:
         return result[:5000]
-
-    full_json = cdp_js('JSON.stringify(window._ROUTER_DATA || {}).substring(0, 80000)')
-    if full_json and len(full_json) > 1000:
-        matches = re.findall(r'"text":"((?:[^"\\\\]|\\\\.){200,})"', full_json)
-        if matches:
-            return matches[-1][:5000]
     return ''
 
-def parse_and_save(douyin_url, response_text):
-    lines = [l.strip() for l in response_text.split('\n') if l.strip()]
-    first_meaningful = next((l for l in lines if len(l) > 10), None)
-    title = first_meaningful[:30] if first_meaningful else douyin_url
+def trim_trailing_question(text):
+    """去除豆包在回复末尾添加的连续询问"""
+    # 匹配常见询问模式：要不要/是否/想不想等开头的问题
+    patterns = [
+        r'要不要我帮你',
+        r'要不要',
+        r'我可以帮你',
+        r'需要我帮你',
+        r'想不想',
+        r'要不要再',
+        r'需要我再',
+    ]
+    for p in patterns:
+        idx = text.rfind(p)
+        if idx > len(text) // 2:  # 在后半部分找到
+            # 找到这个问句的结束位置（句号、问号或换行）
+            remaining = text[idx:]
+            m = re.search(r'[？?\n]', remaining)
+            if m:
+                return text[:idx].strip()
+    return text
+
+def parse_and_save(douyin_url, user_input, response_text):
+    response_text = trim_trailing_question(response_text)
+
+    # 从回复中提取标题标记（优先使用豆包返回的标题）
+    title_match = re.search(r'【标题[：:]\s*([^】]+)】', response_text)
+    if title_match:
+        title = title_match.group(1).strip()
+        # 去掉标题标记
+        response_text = re.sub(r'【标题[：:]\s*[^】]+】\s*', '', response_text).rstrip()
+    else:
+        title = ''
+
+    # 如果标题为空（豆包未返回标题），尝试从用户输入提取
+    if not title:
+        title = extract_title_from_input(user_input)
+        # 如果用户输入也只是链接没有其他内容，标题为空
+        if not title:
+            title = douyin_url
+
+    # 从回复中提取分类标记（支持全角或半角冒号）
+    category_match = re.search(r'【分类[：:]\s*([^】]+)】', response_text)
+    if category_match:
+        category = category_match.group(1).strip()
+        # 去掉分类标记后的回复内容
+        response_text = re.sub(r'【分类[：:]\s*[^】]+】\s*$', '', response_text).rstrip()
+    else:
+        category = '待分类'
 
     tags = []
     tag_keywords = ['恐怖', '搞笑', '治愈', '萌宠', '美食', '剧情', '反转', '感动',
@@ -145,11 +196,12 @@ def parse_and_save(douyin_url, response_text):
     if not tags:
         tags = ['待分类']
 
-    category = '待分类'
-    for cat in ['剧情', '搞笑', '知识', '美食', '萌宠', '生活', '颜值', '音乐', '舞蹈', '游戏']:
-        if cat in tags:
-            category = cat
-            break
+    # 如果分类是待分类，从标签中推断
+    if category == '待分类':
+        for cat in ['剧情', '搞笑', '知识', '美食', '萌宠', '生活', '颜值', '音乐', '舞蹈', '游戏']:
+            if cat in tags:
+                category = cat
+                break
 
     new_entry = {
         "id": 0,
@@ -223,23 +275,16 @@ def main():
     run(f'fill @{ta_ref} "{full_message}"', timeout=5)
     time.sleep(1)
 
-    # 发送 - 使用 CDP 坐标点击（和 generate_image.py 完全一致的方式）
+    # 发送 - 按回车键
     print('🚀 发送消息...')
     send_result = cdp_js('''
         (function() {
-            var btn = document.querySelector('[class*="send-btn-wrapper"]');
-            if (!btn) return 'btn not found';
-            var rect = btn.getBoundingClientRect();
-            var x = rect.left + rect.width / 2;
-            var y = rect.top + rect.height / 2;
-            var dispatch = function(x, y, type) {
-                var evt = new MouseEvent(type, {bubbles: true, cancelable: true, clientX: x, clientY: y, view: window});
-                document.elementFromPoint(x, y).dispatchEvent(evt);
-            };
-            dispatch(x, y, 'mousedown');
-            dispatch(x, y, 'mouseup');
-            dispatch(x, y, 'click');
-            return 'clicked at ' + Math.round(x) + ',' + Math.round(y);
+            var ta = document.querySelector("textarea");
+            if (!ta) return "no textarea";
+            ta.focus();
+            ta.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true}));
+            ta.dispatchEvent(new KeyboardEvent("keyup", {key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true}));
+            return "enter sent";
         })()
     ''')
     print(f'   发送: {send_result}')
@@ -250,15 +295,17 @@ def main():
 
     # 获取回复
     print('📥 获取回复内容...')
+    run(f'screenshot /tmp/response_check_{int(time.time())}.png', timeout=10)
     ai_response = get_ai_response()
     print(f'   回复长度: {len(ai_response)} 字')
+    print(f'   回复预览: {ai_response[:200]}')
 
     if len(ai_response) < 50:
         print('⚠️ 回复内容过短，截图保存')
         run(f'screenshot /tmp/analyze_response_{int(time.time())}.png', timeout=10)
 
     print('💾 保存到脚本库...')
-    entry = parse_and_save(douyin_url, ai_response)
+    entry = parse_and_save(douyin_url, USER_INPUT, ai_response)
 
     print()
     print('=' * 40)
