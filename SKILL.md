@@ -1,7 +1,7 @@
 ---
 name: lei-doubao-browser
 description: 豆包浏览器自动化 - 通过 Chrome Debug 模式 + agent-browser 实现 AI 像真人一样操控浏览器，继承已有登录状态，支持抖音、微博、豆包等需要登录的站点，以及 AI 图片和视频生成功能。
-version: 1.2.0
+version: 1.3.0
 required_permissions:
   - shell
 ---
@@ -25,9 +25,11 @@ lei-doubao-browser/
 ├── SKILL.md              # 本文件
 ├── README.md             # 详细文档
 └── scripts/
-    ├── start.sh          # 启动 Chrome Debug 浏览器
-    ├── generate_image.py # AI 图片生成脚本
-    └── generate_video.py # AI 视频生成脚本
+    ├── start.sh           # 启动 Chrome Debug 浏览器
+    ├── check_login.py     # 登录验证脚本（未登录时弹出二维码）
+    ├── generate_image.py  # AI 图片生成脚本
+    ├── generate_video.py  # AI 视频生成脚本
+    └── analyze_video.py   # 视频链接分析 + 脚本生成（无需登录）
 ```
 
 ## 快速开始
@@ -87,6 +89,31 @@ curl -s http://127.0.0.1:9222/json/list
 agent-browser goto <ws-url>
 ```
 
+## 登录验证
+
+每次打开豆包页面后，必须先验证登录状态，未登录则无法使用 AI 创作功能。
+
+```bash
+# 启动浏览器后，运行登录验证
+python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/check_login.py
+```
+
+### 验证流程
+
+1. 打开豆包页面
+2. 检测右上角是否有「登录」按钮
+3. 有按钮 → 点击按钮 → 检测到二维码弹窗 → 截图提示用户扫码
+4. 无按钮 → 已登录，继续后续操作
+
+### 未登录处理
+
+脚本检测到未登录时会：
+- 自动点击登录按钮
+- 弹出二维码登录框
+- 截图保存到 `~/.openclaw/workspace/doubao/loginImgs/` 目录
+- 提示用户扫码登录
+- 脚本退出（需用户登录后重新运行）
+
 ## 登录状态同步
 
 如果需要在 Debug 浏览器中登录新网站：
@@ -119,6 +146,84 @@ cp <源浏览器cookies路径> ~/.config/chromium-debug/Default/Cookies
 
 ---
 
+## AI 创作工作流
+
+### 完整流程（两种路径）
+
+```
+打开豆包页面
+    │
+    ▼
+┌─────────────────────┐
+│   登录验证 check_login.py   │
+└─────────────────────┘
+    │
+    ├── 未登录 → 点击登录按钮 → 截图保存到 ~/.openclaw/workspace/doubao/loginImgs/ → 提示用户扫码 → 脚本退出
+    │
+    └── 已登录 → 点击「AI 创作」→ 选择生成模式
+                                │
+                                ├── 图片模式 → generate_image.py
+                                └── 视频模式 → generate_video.py
+```
+
+### 路径一：未登录
+
+用户尚未登录时，运行 `check_login.py` 会：
+1. 检测到右上角有「登录」按钮
+2. 自动点击登录按钮
+3. 弹出二维码登录框
+4. 截图保存到 `~/.openclaw/workspace/doubao/loginImgs/login_qr_{时间戳}.png`
+5. 打印截图路径，提示用户扫码
+6. 脚本退出（用户扫码后需重新运行）
+
+### 路径二：已登录
+
+用户已登录时，运行图片或视频脚本会：
+1. 打开豆包页面
+2. 验证登录状态（已登录，无按钮）
+3. 点击「AI 创作」进入创作模式
+4. 执行对应生成脚本
+
+---
+
+## 豆包对话（发送消息）
+
+通过 CDP 直接控制 Chrome，向豆包发送消息并获取回复。
+
+### 使用方式
+
+```bash
+# 1. 先启动 Chrome Debug 浏览器
+bash ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/start.sh
+
+# 2. 在浏览器中手动登录豆包（只需一次）
+# 登录后状态保存在 ~/.config/chromium-debug/
+
+# 3. 发送消息给豆包
+python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/send_message.py "你好，你是谁？"
+```
+
+### 前置条件
+
+1. **必须先登录豆包**（在浏览器中手动登录一次，登录状态会保存在 `~/.config/chromium-debug/`）
+2. 未登录状态下豆包不会回复消息
+
+### 输出示例
+
+```
+📤 发送: 你好，你是谁？
+✅ 找到豆包页面
+🖊️ 填写消息...
+🚀 发送消息...
+⏳ 等待豆包回复（最多60秒）...
+==================================================
+🤖 豆包回复:
+你好！我是豆包，是字节跳动公司开发的 AI 智能助手...
+==================================================
+```
+
+---
+
 ## AI 图片生成
 
 通过豆包的 AI 创作功能，使用 Seedream 4.5 模型生成图片。
@@ -129,34 +234,50 @@ cp <源浏览器cookies路径> ~/.config/chromium-debug/Default/Cookies
 # 启动浏览器（如果还没启动）
 bash ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/start.sh
 
-# 生成图片（输出到 ~/doubao/imgs/）
+# 生成图片（输出到 ~/.openclaw/workspace/doubao/imgs/）
 python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/generate_image.py "一只可爱的小柴犬在海边冲浪"
-python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/generate_image.py "穿着和服的猫娘" ~/doubao/imgs
+python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/generate_image.py "穿着和服的猫娘" ~/.openclaw/workspace/doubao/imgs
 ```
 
 ### 生成流程
 
-1. 自动打开豆包页面
-2. 点击「AI 创作」进入创作模式
-3. 填写提示词
-4. 按回车提交生成
-5. 等待 30 秒生成完成
-6. 提取图片 URL 并下载（4张，384x216，带水印）
-7. 保存到指定目录
+1. 打开豆包页面
+2. 验证登录状态（未登录则弹出二维码，脚本退出）
+3. 点击「AI 创作」进入创作模式
+4. 填写提示词
+5. 按回车提交生成
+6. 等待 30 秒生成完成
+7. 提取图片 URL 并下载（4张，384x216，带水印）
+8. 保存到指定目录
 
 ### 输出示例
 
 ```
-📁 输出目录: /home/lei/doubao/imgs
+📁 输出目录: ~/.openclaw/workspace/doubao/imgs
 🔧 检查 Chrome...
 ✅ Chrome 运行中
 🌐 打开豆包...
-🎨 进入 AI 创作...
-   clicked
+🔐 验证登录状态...
+   检测结果: found: 右上角登录按钮, 位置:1121,10
+🔐 检测到未登录，开始登录流程...
+🖱️ 点击登录按钮...
+   找到登录按钮 @e7，点击...
+🔍 检查登录弹窗...
+   ✅ 检测到二维码登录框
+📸 截图保存...
+==================================================
+⚠️ 未登录，请扫描二维码登陆
+📁 截图: ~/.openclaw/workspace/doubao/loginImgs/login_qr_1775197667.png
+==================================================
+
+# 下面是已登录时的完整输出：
+🔐 验证登录状态...
+✅ 登录验证通过
+🎨 进入 AI 创作页面...
 🔍 找图片描述输入框...
    ✅ 找到 @e43
 ✍️ 填写: 一只可爱的小柴犬在海边冲浪
-🚀 提交...
+🚀 点击生成按钮...
 ⏳ 等待生成（30秒）...
 📥 获取图片...
    第 1 次: 找到 4 张 ✅
@@ -166,7 +287,7 @@ python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/generate_image.p
    第 4 张... ✅ 164KB
 
 ========================================
-✅ 完成！保存 4 张 → /home/lei/doubao/imgs
+✅ 完成！保存 4 张 → ~/.openclaw/workspace/doubao/imgs
 📝 一只可爱的小柴犬在海边冲浪
 ========================================
 ```
@@ -177,7 +298,42 @@ python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/generate_image.p
 - **图片尺寸**: 384x216（豆包 CDN 默认尺寸）
 - **图片格式**: PNG/JPG
 - **文件名**: `{提示词前25字}_{序号}_{时间戳}.png`
-- **存储位置**: 默认 `~/doubao/imgs/`
+- **存储位置**: 默认 `~/.openclaw/workspace/doubao/imgs/`
+
+---
+
+## AI 视频分析 + 脚本生成
+
+通过豆包分析抖音等视频链接，自动生成视频脚本。**无需登录豆包**。
+
+### 使用方式
+
+```bash
+# 分析视频并生成脚本（保存到 scripts.json）
+b ~/.openclaw/workspace/doubao/sheet/scripts/manual/add_script.sh --analyze "https://v.douyin.com/xxx"
+```
+
+### 工作流程
+
+1. 启动**全新的** Chrome Debug 浏览器（每次都是新实例）
+2. 打开豆包网站
+3. 找到输入框，发送视频链接
+4. 豆包自动分析视频内容并生成脚本
+5. 提取豆包的回复，保存到 `doubao/sheet/scripts/data/scripts.json`
+
+### 输出说明
+
+- **保存位置**: `~/.openclaw/workspace/doubao/sheet/scripts/data/scripts.json`
+- **分析内容**: 视频内容、风格、节奏分析 + 可直接拍摄的脚本
+- **无需登录**: 豆包支持未登录用户发送消息
+- **脚本格式**: JSON（包含 id, title, category, platform, content, tags 等字段）
+
+### 适用场景
+
+当你看到好的抖音视频，想借鉴其脚本时：
+1. 复制视频链接
+2. 发送给我：`分析这个视频并生成脚本：[链接]`
+3. 我自动调用豆包分析，保存脚本到库中
 
 ---
 
@@ -188,33 +344,38 @@ python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/generate_image.p
 ### 使用方式
 
 ```bash
-# 生成视频（输出到 ~/doubao/videos/）
+# 生成视频（输出到 ~/.openclaw/workspace/doubao/videos/）
 python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/generate_video.py "一只小猫在草地上奔跑"
-python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/generate_video.py "大熊猫吃竹子" ~/doubao/videos
+python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/generate_video.py "大熊猫吃竹子" ~/.openclaw/workspace/doubao/videos
 ```
 
 ### 生成流程
 
-1. 自动打开豆包页面
-2. 点击「视频生成」按钮
-3. 填写视频描述
-4. 按回车提交生成
-5. 等待 1-3 分钟视频生成完成
-6. 自动点击播放获取视频 URL
-7. 下载视频到本地（MP4 格式）
+1. 打开豆包页面
+2. 验证登录状态（未登录则弹出二维码，脚本退出）
+3. 点击「AI 创作」进入创作模式
+4. 点击「视频」Tab 切换到视频模式
+5. 填写视频描述
+6. 按回车提交生成
+7. 等待 1-3 分钟视频生成完成
+8. 自动点击播放获取视频 URL
+9. 下载视频到本地（MP4 格式）
 
 ### 输出示例
 
 ```
-📁 输出目录: /home/lei/doubao/videos
+📁 输出目录: ~/.openclaw/workspace/doubao/videos
 🔧 检查 Chrome...
 ✅ Chrome 运行中
 🌐 打开豆包...
+🔐 验证登录状态...
+✅ 登录验证通过
+🎨 进入 AI 创作页面...
 🎬 进入视频生成模式...
-   clicked
+   视频tab按钮点击: clicked
    视频输入框 @e34
 ✍️ 填写: 一只小猫在草地上奔跑
-🚀 提交生成...
+🚀 点击发送按钮...
 ⏳ 等待视频生成（最多 180 秒）...
    ✅ 视频生成完成，耗时 150 秒
 📥 下载视频...
@@ -222,7 +383,7 @@ python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/generate_video.p
 
 ========================================
 ✅ 完成！
-📁 /home/lei/doubao/videos/一只小猫在草地上奔跑_1775060795.mp4
+📁 ~/.openclaw/workspace/doubao/videos/一只小猫在草地上奔跑_1775060795.mp4
 📝 一只小猫在草地上奔跑
 ========================================
 ```
@@ -232,5 +393,5 @@ python3 ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/generate_video.p
 - **视频格式**: MP4 (H.264)
 - **视频大小**: 通常 3-8MB
 - **文件名**: `{提示词前20字}_{时间戳}.mp4`
-- **存储位置**: 默认 `~/doubao/videos/`
+- **存储位置**: 默认 `~/.openclaw/workspace/doubao/videos/`
 - **生成时间**: 1-3 分钟

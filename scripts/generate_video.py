@@ -6,9 +6,10 @@
 
 import subprocess, json, sys, time, os, re, http.client, urllib.request
 
-CDP_HOST, CDP_PORT = '127.0.0.1', 9222
+CDP_HOST = '127.0.0.1'
+CDP_PORT = 9222
 PROMPT = sys.argv[1] if len(sys.argv) > 1 else None
-OUTPUT_DIR = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2 else '~/doubao/videos')
+OUTPUT_DIR = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2 else '~/.openclaw/workspace/doubao/videos')
 REF_IMAGES_DIR = os.path.expanduser(sys.argv[3] if len(sys.argv) > 3 else '') if len(sys.argv) > 3 else ''
 
 if not PROMPT:
@@ -29,7 +30,7 @@ def check_chrome():
 
 def run(cmd, timeout=12):
     try:
-        r = subprocess.run(f'agent-browser {cmd}', shell=True,
+        r = subprocess.run(f'agent-browser --cdp {CDP_PORT} {cmd}', shell=True,
                          capture_output=True, text=True, timeout=timeout)
         return r.stdout + r.stderr
     except subprocess.TimeoutExpired:
@@ -165,47 +166,45 @@ def click_video_tab_button():
     """点击视频 tab 按钮（与图片按钮同组的那一个）"""
     js = '''
         (function() {
-            // 查找同时包含"图片"和"视频"的父容器（tab组）
-            var allButtons = document.querySelectorAll("button, div[role='tab'], div[role='button']");
-
-            for (var btn of allButtons) {
+            // 方案1：找包含"图像"和"视频"两个子元素的父容器按钮
+            var buttons = document.querySelectorAll("button");
+            for (var btn of buttons) {
                 var txt = btn.textContent.trim();
-                // 精确匹配"视频"按钮（排除历史记录等干扰项）
-                if (txt === "视频" || txt === "图片/视频") {
+                if (txt === "图像 视频" || txt === "图像视频" || txt === "图片/视频") {
+                    // 在这个按钮组内找视频子元素
+                    var children = btn.querySelectorAll("*, [class]");
+                    for (var child of children) {
+                        var ct = child.textContent.trim();
+                        if (ct === "视频") {
+                            child.scrollIntoView({block: "center"});
+                            child.click();
+                            return "clicked 视频 child in 图像 视频 button";
+                        }
+                    }
+                    // 如果没有子元素直接包含"视频"，尝试直接点击按钮本身（内部可能有tab切换）
                     btn.scrollIntoView({block: "center"});
                     btn.click();
-                    return "clicked: " + txt;
+                    return "clicked 图像 视频 button (parent)";
                 }
             }
 
-            // 方案2：找包含"图片"和"视频"两个子元素的父容器
-            var tabs = document.querySelectorAll('[role="tab"], [class*="tab"]');
+            // 方案2：找直接文本为"视频"的元素
+            for (var btn of buttons) {
+                if (btn.textContent.trim() === "视频") {
+                    btn.scrollIntoView({block: "center"});
+                    btn.click();
+                    return "clicked 视频";
+                }
+            }
+
+            // 方案3：查找 role=tab 且 text 包含视频
+            var tabs = document.querySelectorAll("[role='tab'], [class*='tab']");
             for (var tab of tabs) {
-                var children = tab.querySelectorAll("button, span, div");
-                var hasImage = false, hasVideo = false;
-                for (var child of children) {
-                    var t = child.textContent.trim();
-                    if (t === "图片") hasImage = true;
-                    if (t === "视频") hasVideo = true;
-                }
-                if (hasImage && hasVideo) {
-                    // 在这个tab组内找视频按钮
-                    var videoBtn = Array.from(children).find(c => c.textContent.trim() === "视频");
-                    if (videoBtn) {
-                        videoBtn.scrollIntoView({block: "center"});
-                        videoBtn.click();
-                        return "clicked video in tab group";
-                    }
-                }
-            }
-
-            // 方案3：查找文字为"视频"且是tab类型的元素
-            var tabButtons = document.querySelectorAll('[role="tab"]');
-            for (var tb of tabButtons) {
-                if (tb.textContent.trim() === "视频") {
-                    tb.scrollIntoView({block: "center"});
-                    tb.click();
-                    return "clicked role=tab video";
+                var txt = tab.textContent.trim();
+                if (txt.includes("视频")) {
+                    tab.scrollIntoView({block: "center"});
+                    tab.click();
+                    return "clicked tab with 视频";
                 }
             }
 
@@ -384,6 +383,13 @@ def main():
     run('open "https://www.doubao.com/"', timeout=10)
     time.sleep(3)
 
+    # 登录验证
+    print('🔐 验证登录状态...')
+    r = subprocess.run(['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_login.py')])
+    if r.returncode != 0:
+        print('❌ 登录验证失败，请扫码登录后重试'); sys.exit(1)
+    print('✅ 登录验证通过')
+
     print('🎨 进入 AI 创作页面...')
     snap = run('snapshot -i', timeout=8)
     ai_ref = find_ref(snap, 'AI 创作')
@@ -396,8 +402,50 @@ def main():
     time.sleep(3)
 
     # 找视频输入框
-    snap = run('snapshot -i', timeout=8)
-    ta_ref = find_ref(snap, '添加照片，描述你想生成的视频')
+    ta_ref = None
+    for attempt in range(5):
+        snap = run('snapshot -i', timeout=8)
+        ta_ref = find_ref(snap, '添加照片，描述你想生成的视频')
+        if ta_ref:
+            print(f'   ✅ 找到 @{ta_ref}')
+            break
+        print(f'   第 {attempt+1} 次: 未找到输入框，重试...')
+        time.sleep(2)
+
+    if not ta_ref:
+        # 尝试 JS 方式直接操作 DOM
+        print('   尝试 JS 方式...')
+        js_result = cdp_js('''
+            (function() {
+                var els = document.querySelectorAll("textarea, [contenteditable], input[type='text']");
+                for (var i=0; i<els.length; i++) {
+                    var el = els[i];
+                    if (el.offsetHeight > 0 && el.offsetWidth > 0) {
+                        el.scrollIntoView({block:"center"});
+                        el.focus();
+                        var ns = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set;
+                        ns.call(el, "test");
+                        el.dispatchEvent(new Event("input",{bubbles:true}));
+                        return "found:" + el.tagName;
+                    }
+                }
+                return "not found visible input";
+            })()
+        ''')
+        print(f'   {js_result}')
+        if 'not found' in js_result:
+            print('❌ 未找到视频描述输入框'); sys.exit(1)
+        time.sleep(1)
+        # 重新获取 snapshot 找 ref
+        snap = run('snapshot -i', timeout=8)
+        ta_ref = find_ref(snap, '添加照片，描述你想生成的视频')
+        if not ta_ref:
+            for line in snap.split('\n'):
+                if 'ref=' in line and '添加照片' in line:
+                    m = re.search(r'ref=(e\d+)', line)
+                    if m:
+                        ta_ref = m.group(1)
+                        break
 
     if not ta_ref:
         print('❌ 未找到视频描述输入框'); sys.exit(1)
@@ -411,7 +459,32 @@ def main():
         time.sleep(2)
 
     print(f'✍️ 填写: {PROMPT}')
-    run(f'fill @{ta_ref} "{PROMPT}"', timeout=5)
+    # 优先使用 JS 方式直接填写（更可靠）
+    escaped_prompt = PROMPT.replace('"', '\\"')
+    js_fill = cdp_js(f'''
+        (function() {{
+            var els = document.querySelectorAll("textarea, [contenteditable], input[type='text']");
+            for (var i=0; i<els.length; i++) {{
+                var el = els[i];
+                if (el.offsetHeight > 0 && el.offsetWidth > 0) {{
+                    el.scrollIntoView({{block:"center"}});
+                    el.focus();
+                    var ns = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set;
+                    ns.call(el, "{escaped_prompt}");
+                    el.dispatchEvent(new Event("input",{{bubbles:true}}));
+                    el.dispatchEvent(new Event("change",{{bubbles:true}}));
+                    return "filled:" + el.tagName;
+                }}
+            }}
+            return "fill failed";
+        }})()
+    ''')
+    if 'filled' in js_fill:
+        print(f'   ✅ JS 填写成功')
+    else:
+        # fallback 到 fill 命令
+        print(f'   JS 方式失败，尝试 fill 命令...')
+        run(f'fill @{ta_ref} "{PROMPT}"', timeout=5)
     time.sleep(1)
 
     print('🚀 点击发送按钮...')

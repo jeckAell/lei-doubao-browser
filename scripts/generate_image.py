@@ -31,7 +31,7 @@ def find_chrome_port():
 
 CDP_HOST = '127.0.0.1'
 PROMPT = sys.argv[1] if len(sys.argv) > 1 else None
-OUTPUT_DIR = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2 else '~/doubao/imgs')
+OUTPUT_DIR = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2 else '~/.openclaw/workspace/doubao/imgs')
 
 if not PROMPT:
     print('用法: python3 generate_image.py "图片描述" [输出目录]')
@@ -67,7 +67,10 @@ def find_ref(text, kw):
     """通过文本找 ref，优先找 link 类型"""
     best = None
     for line in text.split('\n'):
-        if f'"{kw}"' not in line and kw not in line:
+        # 检查是否有 ref= 和关键字（支持两种格式）
+        # 格式1: textbox "描述你想要的图片" [ref=e31]:
+        # 格式2: textbox [ref=e31]: 描述你想要的图片
+        if kw not in line:
             continue
         m = re.search(r'ref=(e\d+)', line)
         if not m:
@@ -147,12 +150,12 @@ def main():
     run('open "https://www.doubao.com/"', timeout=10)
     time.sleep(3)
 
-    # 检查登录状态
-    if not is_logged_in():
-        print()
-        print('🔐 检测到未登录，请手动登录后按回车继续...')
-        print('   提示：在浏览器中点击"登录"按钮，用抖音 App 扫码登录')
-        input()
+    # 登录验证
+    print('🔐 验证登录状态...')
+    r = subprocess.run(['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_login.py')])
+    if r.returncode != 0:
+        print('❌ 登录验证失败，请扫码登录后重试'); sys.exit(1)
+    print('✅ 登录验证通过')
 
     print('🎨 进入 AI 创作页面...')
     # 点击 AI 创作链接
