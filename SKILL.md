@@ -1,7 +1,7 @@
 ---
 name: lei-doubao-browser
 description: 豆包浏览器自动化 - 通过 Chrome Debug 模式 + agent-browser 实现 AI 像真人一样操控浏览器，继承已有登录状态，支持抖音、微博、豆包等需要登录的站点，以及 AI 图片和视频生成功能。
-version: 1.3.0
+version: 1.4.0
 required_permissions:
   - shell
 ---
@@ -25,11 +25,13 @@ lei-doubao-browser/
 ├── SKILL.md              # 本文件
 ├── README.md             # 详细文档
 └── scripts/
-    ├── start.sh           # 启动 Chrome Debug 浏览器
+    ├── start.sh           # 启动 Chrome Debug 浏览器（支持 headless/test 模式）
+    ├── browser_utils.py   # 浏览器标签页管理工具
     ├── check_login.py     # 登录验证脚本（未登录时弹出二维码）
     ├── generate_image.py  # AI 图片生成脚本
     ├── generate_video.py  # AI 视频生成脚本
-    └── analyze_video.py   # 视频链接分析 + 脚本生成（无需登录）
+    ├── analyze_video.py   # 视频链接分析 + 脚本生成（无需登录）
+    └── send_message.py    # 豆包对话发送脚本
 ```
 
 ## 快速开始
@@ -37,7 +39,11 @@ lei-doubao-browser/
 ### 第一步：启动 Chrome Debug 浏览器
 
 ```bash
+# headless 无头模式（默认，不显示窗口）
 bash ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/start.sh
+
+# 测试模式（显示浏览器窗口，方便调试）
+bash ~/.openclaw/workspace/skills/lei-doubao-browser/scripts/start.sh test
 ```
 
 浏览器会在后台启动，监听 `9222` 端口。

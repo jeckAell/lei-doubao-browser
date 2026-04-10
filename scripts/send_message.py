@@ -13,6 +13,10 @@ import subprocess, json, sys, time, os, re, http.client, asyncio, websockets
 
 CDP_PORT = 9222
 
+# 导入浏览器标签页管理工具
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from browser_utils import close_other_tabs
+
 def get_doubao_page():
     """获取豆包页面"""
     try:
@@ -305,27 +309,30 @@ def extract_reply(full_text):
     return None
 
 def main():
-    if len(sys.argv) < 2:
-        print('用法: python3 send_message.py "你的问题"')
-        print('示例: python3 send_message.py "你好，你是谁？"')
-        sys.exit(1)
-    
-    message = sys.argv[1]
-    print(f'📤 发送: {message}')
-    print()
-    
-    full_content = send_message(message)
-    
-    if full_content:
-        reply = extract_reply(full_content)
+    try:
+        if len(sys.argv) < 2:
+            print('用法: python3 send_message.py "你的问题"')
+            print('示例: python3 send_message.py "你好，你是谁？"')
+            sys.exit(1)
+
+        message = sys.argv[1]
+        print(f'📤 发送: {message}')
         print()
-        print('=' * 50)
-        print('🤖 豆包回复:')
-        print(reply[-1500:] if reply and len(reply) > 1500 else (reply or '未获取到有效回复'))
-        print('=' * 50)
-    else:
-        print()
-        print('❌ 未获取到回复')
+
+        full_content = send_message(message)
+
+        if full_content:
+            reply = extract_reply(full_content)
+            print()
+            print('=' * 50)
+            print('🤖 豆包回复:')
+            print(reply[-1500:] if reply and len(reply) > 1500 else (reply or '未获取到有效回复'))
+            print('=' * 50)
+        else:
+            print()
+            print('❌ 未获取到回复')
+    finally:
+        close_other_tabs()
 
 if __name__ == '__main__':
     main()

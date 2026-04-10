@@ -6,35 +6,36 @@
 功能：分析抖音视频，提取视频脚本、特点、爆火原因，保存到视频脚本库
 """
 
-import subprocess, json, sys, time, os, re, http.client
+import subprocess, json, sys, time, os, re, http.client, argparse
+from browser_utils import check_chrome, run, close_other_tabs
 
 CDP_HOST = '127.0.0.1'
 CDP_PORT = 9222
-USER_INPUT = sys.argv[1] if len(sys.argv) > 1 else None
 SCRIPTS_FILE = os.path.expanduser('~/.openclaw/workspace/doubao/sheet/scripts/data/scripts.json')
 
+parser = argparse.ArgumentParser(description='豆包 AI 视频解析脚本')
+parser.add_argument('input', nargs='?', help='抖音视频链接或分享内容')
+parser.add_argument('--test', action='store_true', help='测试模式：每步截图')
+args = parser.parse_args()
+
+USER_INPUT = args.input
+TEST_MODE = args.test
+
 if not USER_INPUT:
-    print('用法: python3 analyze_video.py "抖音视频链接或分享内容"')
+    print('用法: python3 analyze_video.py "抖音视频链接或分享内容" [--test]')
     sys.exit(1)
 
+if TEST_MODE:
+    print('🧪 测试模式已开启，每步会截图')
+
+def take_snap(name=''):
+    """测试模式截图"""
+    if TEST_MODE:
+        path = f'/tmp/analyze_{name}_{int(time.time())}.png'
+        run(f'screenshot {path}', timeout=10)
+        print(f'   📸 截图: {path}')
+
 EXTRA_PROMPT = "解析视频，分析出视频脚本、视频特点、爆火原因，并为这个视频起一个简短有吸引力的标题。回复最后请以【标题: xxx】和【分类: xxx】格式标注视频标题和所属分区（如【标题: 这条视频为什么爆火】）【分类: 搞笑】"
-
-def check_chrome():
-    try:
-        c = http.client.HTTPConnection(CDP_HOST, CDP_PORT, timeout=3)
-        c.request('GET', '/json/version')
-        c.getresponse().read(); c.close()
-        return True
-    except:
-        return False
-
-def run(cmd, timeout=12):
-    try:
-        r = subprocess.run(f'agent-browser --cdp {CDP_PORT} {cmd}', shell=True,
-                         capture_output=True, text=True, timeout=timeout)
-        return r.stdout + r.stderr
-    except subprocess.TimeoutExpired:
-        return ''
 
 def find_ref(text, kw):
     for line in text.split('\n'):
@@ -44,6 +45,20 @@ def find_ref(text, kw):
         if m:
             return m.group(1)
     return None
+
+def find_doubao_tab():
+    """查找已打开的豆包标签页，返回 (targetId, url) 或 (None, None)"""
+    try:
+        c = http.client.HTTPConnection(CDP_HOST, CDP_PORT, timeout=5)
+        c.request('GET', '/json/list')
+        pages = json.loads(c.getresponse().read()); c.close()
+        for p in pages:
+            url = p.get('url', '')
+            if 'doubao.com' in url:
+                return p.get('id', ''), url
+        return None, None
+    except:
+        return None, None
 
 def cdp_js(js):
     """执行 JS 并返回结果字符串"""
@@ -69,6 +84,7 @@ def cdp_js(js):
         return asyncio.run(do())
     except Exception as e:
         return f'error:{e}'
+
 
 def get_next_id(scripts):
     if not scripts:
@@ -233,16 +249,26 @@ def main():
         douyin_url = USER_INPUT[:100]
     print(f'📎 抖音链接: {douyin_url}')
 
-    print('🌐 打开豆包...')
-    run('open "https://www.doubao.com/chat/"', timeout=10)
-    time.sleep(3)
+    # 查找是否已有豆包标签页
+    existing_id, existing_url = find_doubao_tab()
+    if existing_id:
+        print(f'🔁 发现已有豆包标签页: {existing_id}')
+        print(f'   复用已有标签页，不开新标签')
+        run(f'focus {existing_id}', timeout=8)
+        time.sleep(2)
+    else:
+        print('🌐 未发现豆包标签页，打开新标签...')
+        run('open "https://www.doubao.com/chat/"', timeout=10)
+        time.sleep(3)
+    take_snap('1_doubao_tab')
 
     # 登录验证
     print('🔐 验证登录状态...')
-    r = subprocess.run(['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_login.py')])
+    r = subprocess.run(['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_login.py'), '--keep-tabs'])
     if r.returncode != 0:
         print('❌ 登录验证失败，请扫码登录后重试'); sys.exit(1)
     print('✅ 登录验证通过')
+    take_snap('2_after_login')
 
     # 点击"新对话"
     print('💬 开始新对话...')
@@ -251,6 +277,7 @@ def main():
     if new_conv_ref:
         run(f'click @{new_conv_ref}', timeout=8)
     time.sleep(3)
+    take_snap('3_new_chat')
 
     # 找消息输入框
     print('🔍 找消息输入框...')
@@ -266,6 +293,7 @@ def main():
 
     if not ta_ref:
         print('❌ 未找到消息输入框'); sys.exit(1)
+    take_snap('4_input_ready')
 
     # 组合完整消息
     full_message = f'{USER_INPUT}\n\n{EXTRA_PROMPT}'
@@ -274,6 +302,7 @@ def main():
     print(f'✍️ 填写: {full_message[:50]}...')
     run(f'fill @{ta_ref} "{full_message}"', timeout=5)
     time.sleep(1)
+    take_snap('5_message_filled')
 
     # 发送 - 按回车键
     print('🚀 发送消息...')
@@ -288,6 +317,7 @@ def main():
         })()
     ''')
     print(f'   发送: {send_result}')
+    take_snap('6_message_sent')
 
     # 等待回复（固定 30 秒，和 generate_image.py 一致）
     print('⏳ 等待回复（60秒）...')
@@ -295,7 +325,7 @@ def main():
 
     # 获取回复
     print('📥 获取回复内容...')
-    run(f'screenshot /tmp/response_check_{int(time.time())}.png', timeout=10)
+    take_snap('7_response_received')
     ai_response = get_ai_response()
     print(f'   回复长度: {len(ai_response)} 字')
     print(f'   回复预览: {ai_response[:200]}')

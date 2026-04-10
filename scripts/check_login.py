@@ -10,6 +10,10 @@ import subprocess, json, sys, time, os, re, http.client
 CDP_HOST, CDP_PORT = '127.0.0.1', 9222
 SCREENSHOT_DIR = os.path.expanduser('~/.openclaw/workspace/doubao/loginImgs')
 
+# 导入浏览器标签页管理工具
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from browser_utils import close_other_tabs
+
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 def check_chrome():
@@ -181,55 +185,59 @@ def take_screenshot():
     return None
 
 def main():
-    print('🔧 检查 Chrome...')
-    if not check_chrome():
-        print('❌ Chrome Debug 未启动，请先运行 start.sh')
-        sys.exit(1)
-    print('✅ Chrome 运行中')
+    try:
+        print('🔧 检查 Chrome...')
+        if not check_chrome():
+            print('❌ Chrome Debug 未启动，请先运行 start.sh')
+            sys.exit(1)
+        print('✅ Chrome 运行中')
 
-    print('🌐 检查豆包登录状态...')
-    run('open "https://www.doubao.com/"', timeout=10)
-    time.sleep(3)
+        print('🌐 检查豆包登录状态...')
+        run('open "https://www.doubao.com/"', timeout=10)
+        time.sleep(3)
 
-    print('🔍 检测右上角登录按钮...')
-    is_not_logged_in = check_login_button()
+        print('🔍 检测右上角登录按钮...')
+        is_not_logged_in = check_login_button()
 
-    if not is_not_logged_in:
+        if not is_not_logged_in:
+            print()
+            print('=' * 50)
+            print('✅ 已登录')
+            print('=' * 50)
+            return
+
+        # 未登录，开始登录流程
+        print()
+        print('🔐 检测到未登录，开始登录流程...')
+
+        print('🖱️ 点击登录按钮...')
+        click_login_button()
+        time.sleep(2)
+
+        print('🔍 检查登录弹窗...')
+        has_qr = check_qrcode_dialog()
+        if not has_qr:
+            print('   等待弹窗出现...')
+            time.sleep(2)
+            has_qr = check_qrcode_dialog()
+
+        if has_qr:
+            print('   ✅ 检测到二维码登录框')
+        else:
+            print('   ⚠️ 未检测到二维码，但继续截图')
+
+        print('📸 截图保存...')
+        screenshot_path = take_screenshot()
+
         print()
         print('=' * 50)
-        print('✅ 已登录')
+        print('⚠️ 未登录，请扫描二维码登陆')
+        if screenshot_path:
+            print(f'📁 截图: {screenshot_path}')
         print('=' * 50)
-        return
-
-    # 未登录，开始登录流程
-    print()
-    print('🔐 检测到未登录，开始登录流程...')
-
-    print('🖱️ 点击登录按钮...')
-    click_login_button()
-    time.sleep(2)
-
-    print('🔍 检查登录弹窗...')
-    has_qr = check_qrcode_dialog()
-    if not has_qr:
-        print('   等待弹窗出现...')
-        time.sleep(2)
-        has_qr = check_qrcode_dialog()
-
-    if has_qr:
-        print('   ✅ 检测到二维码登录框')
-    else:
-        print('   ⚠️ 未检测到二维码，但继续截图')
-
-    print('📸 截图保存...')
-    screenshot_path = take_screenshot()
-
-    print()
-    print('=' * 50)
-    print('⚠️ 未登录，请扫描二维码登陆')
-    if screenshot_path:
-        print(f'📁 截图: {screenshot_path}')
-    print('=' * 50)
+    finally:
+        if __name__ == '__main__' and '--keep-tabs' not in sys.argv:
+            close_other_tabs()
 
 if __name__ == '__main__':
     main()

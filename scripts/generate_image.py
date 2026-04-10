@@ -6,6 +6,10 @@
 
 import subprocess, json, sys, time, os, re, http.client, urllib.request
 
+# 导入浏览器标签页管理工具
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from browser_utils import close_other_tabs
+
 def find_chrome_port():
     """自动发现 Chrome 调试端口"""
     for env_var in ['AGENT_BROWSER_CDP_PORT', 'AGENT_BROWSER_STREAM_PORT']:
@@ -141,137 +145,140 @@ def download(url, path):
         return None
 
 def main():
-    print('🔧 检查 Chrome...')
-    if not check_chrome():
-        print('❌ Chrome Debug 未启动，请先运行 start.sh'); sys.exit(1)
-    print('✅ Chrome 运行中')
+    try:
+        print('🔧 检查 Chrome...')
+        if not check_chrome():
+            print('❌ Chrome Debug 未启动，请先运行 start.sh'); sys.exit(1)
+        print('✅ Chrome 运行中')
 
-    print('🌐 打开豆包...')
-    run('open "https://www.doubao.com/"', timeout=10)
-    time.sleep(3)
-
-    # 登录验证
-    print('🔐 验证登录状态...')
-    r = subprocess.run(['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_login.py')])
-    if r.returncode != 0:
-        print('❌ 登录验证失败，请扫码登录后重试'); sys.exit(1)
-    print('✅ 登录验证通过')
-
-    print('🎨 进入 AI 创作页面...')
-    # 点击 AI 创作链接
-    snap = run('snapshot -i', timeout=8)
-    ai_ref = find_ref(snap, 'AI 创作')
-    if ai_ref:
-        run(f'click @{ai_ref}', timeout=8)
-    time.sleep(4)
-
-    print('🔍 找图片描述输入框...')
-    ta_ref = None
-    for attempt in range(5):
-        snap = run('snapshot -i', timeout=8)
-        ta_ref = find_ref(snap, '描述你想要的图片')
-        if ta_ref: print(f'   ✅ 找到 @{ta_ref}'); break
-        print(f'   第 {attempt+1} 次: 未找到，重试...')
-        time.sleep(2)
-
-    if not ta_ref:
-        # 尝试 JS 方式
-        print('   尝试 JS 方式...')
-        js_result = cdp_js('''
-            (function() {
-                var els = document.querySelectorAll("textarea, [contenteditable], input[type='text']");
-                for (var i=0; i<els.length; i++) {
-                    var el = els[i];
-                    if (el.offsetHeight > 0 && el.offsetWidth > 0) {
-                        el.scrollIntoView({block:"center"});
-                        el.focus();
-                        var ns = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set;
-                        ns.call(el, "test");
-                        el.dispatchEvent(new Event("input",{bubbles:true}));
-                        return "found:" + el.tagName;
-                    }
-                }
-                return "not found visible input";
-            })()
-        ''')
-        print(f'   {js_result}')
-        if 'not found' in js_result:
-            print('❌ 未找到输入框'); sys.exit(1)
-        time.sleep(1)
-        # 重新获取 snapshot 找 ref
-        snap = run('snapshot -i', timeout=8)
-        ta_ref = find_ref(snap, '描述你想要的图片')
-        if not ta_ref:
-            snap = run('snapshot -i', timeout=8)
-            for line in snap.split('\n'):
-                if 'ref=' in line and '描述你想要的图片' in line:
-                    m = re.search(r'ref=(e\d+)', line)
-                    if m: ta_ref = m.group(1); break
-
-    if not ta_ref:
-        print('❌ 未找到输入框'); sys.exit(1)
-
-    print(f'✍️ 填写: {PROMPT}')
-    run(f'fill @{ta_ref} "{PROMPT}"', timeout=5)
-    time.sleep(1)
-
-    print('🚀 点击生成按钮...')
-    # 使用 CDP 鼠标点击坐标 (按钮中心约 x:1140, y:293)
-    cdp_js('''
-        (function() {
-            var btn = document.querySelector('[class*="send-btn-wrapper"]');
-            if (!btn) return 'btn not found';
-            var rect = btn.getBoundingClientRect();
-            var x = rect.left + rect.width / 2;
-            var y = rect.top + rect.height / 2;
-            var dispatch = function(x, y, type) {
-                var evt = new MouseEvent(type, {bubbles: true, cancelable: true, clientX: x, clientY: y, view: window});
-                document.elementFromPoint(x, y).dispatchEvent(evt);
-            };
-            dispatch(x, y, 'mousedown');
-            dispatch(x, y, 'mouseup');
-            dispatch(x, y, 'click');
-            return 'clicked at ' + Math.round(x) + ',' + Math.round(y);
-        })()
-    ''')
-
-    print('⏳ 等待生成（30秒）...')
-    time.sleep(30)
-
-    print('📥 获取图片...')
-    urls = []
-    for attempt in range(5):
-        urls = get_image_urls()
-        if len(urls) >= 4:
-            print(f'   第 {attempt+1} 次: 找到 {len(urls)} 张 ✅')
-            break
-        print(f'   第 {attempt+1} 次: {len(urls)} 张，重试...')
+        print('🌐 打开豆包...')
+        run('open "https://www.doubao.com/"', timeout=10)
         time.sleep(3)
 
-    if not urls:
-        print('❌ 未找到图片，保存截图...')
-        run(f'screenshot {OUTPUT_DIR}/fail_{int(time.time())}.png', timeout=10)
-        sys.exit(1)
+        # 登录验证
+        print('🔐 验证登录状态...')
+        r = subprocess.run(['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_login.py')])
+        if r.returncode != 0:
+            print('❌ 登录验证失败，请扫码登录后重试'); sys.exit(1)
+        print('✅ 登录验证通过')
 
-    safe = re.sub(r'[^\w\u4e00-\u9fff\s]', '', PROMPT).strip()[:25] or 'img'
-    ts = int(time.time())
-    saved = 0
-    for i, url in enumerate(urls[:4]):
-        ext = 'png' if '.png' in url else 'jpg'
-        path = f'{OUTPUT_DIR}/{safe}_{i+1}_{ts}.{ext}'
-        print(f'   第 {i+1} 张... ', end='', flush=True)
-        sz = download(url, path)
-        if sz:
-            print(f'✅ {sz//1024}KB')
-            saved += 1
-        else:
-            print('❌')
+        print('🎨 进入 AI 创作页面...')
+        # 点击 AI 创作链接
+        snap = run('snapshot -i', timeout=8)
+        ai_ref = find_ref(snap, 'AI 创作')
+        if ai_ref:
+            run(f'click @{ai_ref}', timeout=8)
+        time.sleep(4)
 
-    print()
-    print('=' * 40)
-    print(f'✅ 完成！保存 {saved} 张 → {OUTPUT_DIR}')
-    print(f'📝 {PROMPT}')
-    print('=' * 40)
+        print('🔍 找图片描述输入框...')
+        ta_ref = None
+        for attempt in range(5):
+            snap = run('snapshot -i', timeout=8)
+            ta_ref = find_ref(snap, '描述你想要的图片')
+            if ta_ref: print(f'   ✅ 找到 @{ta_ref}'); break
+            print(f'   第 {attempt+1} 次: 未找到，重试...')
+            time.sleep(2)
+
+        if not ta_ref:
+            # 尝试 JS 方式
+            print('   尝试 JS 方式...')
+            js_result = cdp_js('''
+                (function() {
+                    var els = document.querySelectorAll("textarea, [contenteditable], input[type='text']");
+                    for (var i=0; i<els.length; i++) {
+                        var el = els[i];
+                        if (el.offsetHeight > 0 && el.offsetWidth > 0) {
+                            el.scrollIntoView({block:"center"});
+                            el.focus();
+                            var ns = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set;
+                            ns.call(el, "test");
+                            el.dispatchEvent(new Event("input",{bubbles:true}));
+                            return "found:" + el.tagName;
+                        }
+                    }
+                    return "not found visible input";
+                })()
+            ''')
+            print(f'   {js_result}')
+            if 'not found' in js_result:
+                print('❌ 未找到输入框'); sys.exit(1)
+            time.sleep(1)
+            # 重新获取 snapshot 找 ref
+            snap = run('snapshot -i', timeout=8)
+            ta_ref = find_ref(snap, '描述你想要的图片')
+            if not ta_ref:
+                snap = run('snapshot -i', timeout=8)
+                for line in snap.split('\n'):
+                    if 'ref=' in line and '描述你想要的图片' in line:
+                        m = re.search(r'ref=(e\d+)', line)
+                        if m: ta_ref = m.group(1); break
+
+        if not ta_ref:
+            print('❌ 未找到输入框'); sys.exit(1)
+
+        print(f'✍️ 填写: {PROMPT}')
+        run(f'fill @{ta_ref} "{PROMPT}"', timeout=5)
+        time.sleep(1)
+
+        print('🚀 点击生成按钮...')
+        # 使用 CDP 鼠标点击坐标 (按钮中心约 x:1140, y:293)
+        cdp_js('''
+            (function() {
+                var btn = document.querySelector('[class*="send-btn-wrapper"]');
+                if (!btn) return 'btn not found';
+                var rect = btn.getBoundingClientRect();
+                var x = rect.left + rect.width / 2;
+                var y = rect.top + rect.height / 2;
+                var dispatch = function(x, y, type) {
+                    var evt = new MouseEvent(type, {bubbles: true, cancelable: true, clientX: x, clientY: y, view: window});
+                    document.elementFromPoint(x, y).dispatchEvent(evt);
+                };
+                dispatch(x, y, 'mousedown');
+                dispatch(x, y, 'mouseup');
+                dispatch(x, y, 'click');
+                return 'clicked at ' + Math.round(x) + ',' + Math.round(y);
+            })()
+        ''')
+
+        print('⏳ 等待生成（30秒）...')
+        time.sleep(30)
+
+        print('📥 获取图片...')
+        urls = []
+        for attempt in range(5):
+            urls = get_image_urls()
+            if len(urls) >= 4:
+                print(f'   第 {attempt+1} 次: 找到 {len(urls)} 张 ✅')
+                break
+            print(f'   第 {attempt+1} 次: {len(urls)} 张，重试...')
+            time.sleep(3)
+
+        if not urls:
+            print('❌ 未找到图片，保存截图...')
+            run(f'screenshot {OUTPUT_DIR}/fail_{int(time.time())}.png', timeout=10)
+            sys.exit(1)
+
+        safe = re.sub(r'[^\w\u4e00-\u9fff\s]', '', PROMPT).strip()[:25] or 'img'
+        ts = int(time.time())
+        saved = 0
+        for i, url in enumerate(urls[:4]):
+            ext = 'png' if '.png' in url else 'jpg'
+            path = f'{OUTPUT_DIR}/{safe}_{i+1}_{ts}.{ext}'
+            print(f'   第 {i+1} 张... ', end='', flush=True)
+            sz = download(url, path)
+            if sz:
+                print(f'✅ {sz//1024}KB')
+                saved += 1
+            else:
+                print('❌')
+
+        print()
+        print('=' * 40)
+        print(f'✅ 完成！保存 {saved} 张 → {OUTPUT_DIR}')
+        print(f'📝 {PROMPT}')
+        print('=' * 40)
+    finally:
+        close_other_tabs()
 
 if __name__ == '__main__':
     main()

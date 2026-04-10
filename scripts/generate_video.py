@@ -7,6 +7,10 @@
 import subprocess, json, sys, time, os, re, http.client, urllib.request
 
 CDP_HOST = '127.0.0.1'
+
+# 导入浏览器标签页管理工具
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from browser_utils import close_other_tabs
 CDP_PORT = 9222
 PROMPT = sys.argv[1] if len(sys.argv) > 1 else None
 OUTPUT_DIR = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2 else '~/.openclaw/workspace/doubao/videos')
@@ -374,167 +378,170 @@ def upload_ref_images():
         time.sleep(2)
 
 def main():
-    print('🔧 检查 Chrome...')
-    if not check_chrome():
-        print('❌ Chrome Debug 未启动，请先运行 start.sh'); sys.exit(1)
-    print('✅ Chrome 运行中')
+    try:
+        print('🔧 检查 Chrome...')
+        if not check_chrome():
+            print('❌ Chrome Debug 未启动，请先运行 start.sh'); sys.exit(1)
+        print('✅ Chrome 运行中')
 
-    print('🌐 打开豆包...')
-    run('open "https://www.doubao.com/"', timeout=10)
-    time.sleep(3)
+        print('🌐 打开豆包...')
+        run('open "https://www.doubao.com/"', timeout=10)
+        time.sleep(3)
 
-    # 登录验证
-    print('🔐 验证登录状态...')
-    r = subprocess.run(['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_login.py')])
-    if r.returncode != 0:
-        print('❌ 登录验证失败，请扫码登录后重试'); sys.exit(1)
-    print('✅ 登录验证通过')
+        # 登录验证
+        print('🔐 验证登录状态...')
+        r = subprocess.run(['python3', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_login.py')])
+        if r.returncode != 0:
+            print('❌ 登录验证失败，请扫码登录后重试'); sys.exit(1)
+        print('✅ 登录验证通过')
 
-    print('🎨 进入 AI 创作页面...')
-    snap = run('snapshot -i', timeout=8)
-    ai_ref = find_ref(snap, 'AI 创作')
-    if ai_ref:
-        run(f'click @{ai_ref}', timeout=8)
-    time.sleep(4)
-
-    print('🎬 进入视频生成模式...')
-    click_video_tab_button()
-    time.sleep(3)
-
-    # 找视频输入框
-    ta_ref = None
-    for attempt in range(5):
+        print('🎨 进入 AI 创作页面...')
         snap = run('snapshot -i', timeout=8)
-        ta_ref = find_ref(snap, '添加照片，描述你想生成的视频')
-        if ta_ref:
-            print(f'   ✅ 找到 @{ta_ref}')
-            break
-        print(f'   第 {attempt+1} 次: 未找到输入框，重试...')
-        time.sleep(2)
+        ai_ref = find_ref(snap, 'AI 创作')
+        if ai_ref:
+            run(f'click @{ai_ref}', timeout=8)
+        time.sleep(4)
 
-    if not ta_ref:
-        # 尝试 JS 方式直接操作 DOM
-        print('   尝试 JS 方式...')
-        js_result = cdp_js('''
-            (function() {
+        print('🎬 进入视频生成模式...')
+        click_video_tab_button()
+        time.sleep(3)
+
+        # 找视频输入框
+        ta_ref = None
+        for attempt in range(5):
+            snap = run('snapshot -i', timeout=8)
+            ta_ref = find_ref(snap, '添加照片，描述你想生成的视频')
+            if ta_ref:
+                print(f'   ✅ 找到 @{ta_ref}')
+                break
+            print(f'   第 {attempt+1} 次: 未找到输入框，重试...')
+            time.sleep(2)
+
+        if not ta_ref:
+            # 尝试 JS 方式直接操作 DOM
+            print('   尝试 JS 方式...')
+            js_result = cdp_js('''
+                (function() {
+                    var els = document.querySelectorAll("textarea, [contenteditable], input[type='text']");
+                    for (var i=0; i<els.length; i++) {
+                        var el = els[i];
+                        if (el.offsetHeight > 0 && el.offsetWidth > 0) {
+                            el.scrollIntoView({block:"center"});
+                            el.focus();
+                            var ns = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set;
+                            ns.call(el, "test");
+                            el.dispatchEvent(new Event("input",{bubbles:true}));
+                            return "found:" + el.tagName;
+                        }
+                    }
+                    return "not found visible input";
+                })()
+            ''')
+            print(f'   {js_result}')
+            if 'not found' in js_result:
+                print('❌ 未找到视频描述输入框'); sys.exit(1)
+            time.sleep(1)
+            # 重新获取 snapshot 找 ref
+            snap = run('snapshot -i', timeout=8)
+            ta_ref = find_ref(snap, '添加照片，描述你想生成的视频')
+            if not ta_ref:
+                for line in snap.split('\n'):
+                    if 'ref=' in line and '添加照片' in line:
+                        m = re.search(r'ref=(e\d+)', line)
+                        if m:
+                            ta_ref = m.group(1)
+                            break
+
+        if not ta_ref:
+            print('❌ 未找到视频描述输入框'); sys.exit(1)
+
+        print(f'   视频输入框 @{ta_ref}')
+
+        # 上传参考图（在填写提示词之前）
+        if REF_IMAGES_DIR:
+            print(f'📁 参考图目录: {REF_IMAGES_DIR}')
+            upload_ref_images()
+            time.sleep(2)
+
+        print(f'✍️ 填写: {PROMPT}')
+        # 优先使用 JS 方式直接填写（更可靠）
+        escaped_prompt = PROMPT.replace('"', '\\"')
+        js_fill = cdp_js(f'''
+            (function() {{
                 var els = document.querySelectorAll("textarea, [contenteditable], input[type='text']");
-                for (var i=0; i<els.length; i++) {
+                for (var i=0; i<els.length; i++) {{
                     var el = els[i];
-                    if (el.offsetHeight > 0 && el.offsetWidth > 0) {
-                        el.scrollIntoView({block:"center"});
+                    if (el.offsetHeight > 0 && el.offsetWidth > 0) {{
+                        el.scrollIntoView({{block:"center"}});
                         el.focus();
                         var ns = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set;
-                        ns.call(el, "test");
-                        el.dispatchEvent(new Event("input",{bubbles:true}));
-                        return "found:" + el.tagName;
-                    }
-                }
-                return "not found visible input";
+                        ns.call(el, "{escaped_prompt}");
+                        el.dispatchEvent(new Event("input",{{bubbles:true}}));
+                        el.dispatchEvent(new Event("change",{{bubbles:true}}));
+                        return "filled:" + el.tagName;
+                    }}
+                }}
+                return "fill failed";
+            }})()
+        ''')
+        if 'filled' in js_fill:
+            print(f'   ✅ JS 填写成功')
+        else:
+            # fallback 到 fill 命令
+            print(f'   JS 方式失败，尝试 fill 命令...')
+            run(f'fill @{ta_ref} "{PROMPT}"', timeout=5)
+        time.sleep(1)
+
+        print('🚀 点击发送按钮...')
+        cdp_js('''
+            (function() {
+                var btn = document.querySelector('[class*="send-btn-wrapper"]');
+                if (!btn) return 'not found';
+                var rect = btn.getBoundingClientRect();
+                var x = rect.left + rect.width / 2;
+                var y = rect.top + rect.height / 2;
+                var dispatch = function(x, y, type) {
+                    var evt = new MouseEvent(type, {bubbles: true, cancelable: true, clientX: x, clientY: y, view: window});
+                    document.elementFromPoint(x, y).dispatchEvent(evt);
+                };
+                dispatch(x, y, 'mousedown');
+                dispatch(x, y, 'mouseup');
+                dispatch(x, y, 'click');
+                return 'clicked at ' + Math.round(x) + ',' + Math.round(y);
             })()
         ''')
-        print(f'   {js_result}')
-        if 'not found' in js_result:
-            print('❌ 未找到视频描述输入框'); sys.exit(1)
-        time.sleep(1)
-        # 重新获取 snapshot 找 ref
-        snap = run('snapshot -i', timeout=8)
-        ta_ref = find_ref(snap, '添加照片，描述你想生成的视频')
-        if not ta_ref:
-            for line in snap.split('\n'):
-                if 'ref=' in line and '添加照片' in line:
-                    m = re.search(r'ref=(e\d+)', line)
-                    if m:
-                        ta_ref = m.group(1)
-                        break
 
-    if not ta_ref:
-        print('❌ 未找到视频描述输入框'); sys.exit(1)
+        # 等待视频生成
+        video_url = wait_for_video()
 
-    print(f'   视频输入框 @{ta_ref}')
+        if not video_url or 'no video' in str(video_url) or 'error' in str(video_url):
+            print(f'❌ 视频获取失败: {video_url}')
+            run(f'screenshot {OUTPUT_DIR}/fail_{int(time.time())}.png', timeout=10)
+            sys.exit(1)
 
-    # 上传参考图（在填写提示词之前）
-    if REF_IMAGES_DIR:
-        print(f'📁 参考图目录: {REF_IMAGES_DIR}')
-        upload_ref_images()
-        time.sleep(2)
+        # 下载视频
+        safe = re.sub(r'[^\w\u4e00-\u9fff\s]', '', PROMPT).strip()[:20] or 'video'
+        ts = int(time.time())
+        filename = f'{safe}_{ts}.mp4'
+        filepath = f'{OUTPUT_DIR}/{filename}'
 
-    print(f'✍️ 填写: {PROMPT}')
-    # 优先使用 JS 方式直接填写（更可靠）
-    escaped_prompt = PROMPT.replace('"', '\\"')
-    js_fill = cdp_js(f'''
-        (function() {{
-            var els = document.querySelectorAll("textarea, [contenteditable], input[type='text']");
-            for (var i=0; i<els.length; i++) {{
-                var el = els[i];
-                if (el.offsetHeight > 0 && el.offsetWidth > 0) {{
-                    el.scrollIntoView({{block:"center"}});
-                    el.focus();
-                    var ns = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set;
-                    ns.call(el, "{escaped_prompt}");
-                    el.dispatchEvent(new Event("input",{{bubbles:true}}));
-                    el.dispatchEvent(new Event("change",{{bubbles:true}}));
-                    return "filled:" + el.tagName;
-                }}
-            }}
-            return "fill failed";
-        }})()
-    ''')
-    if 'filled' in js_fill:
-        print(f'   ✅ JS 填写成功')
-    else:
-        # fallback 到 fill 命令
-        print(f'   JS 方式失败，尝试 fill 命令...')
-        run(f'fill @{ta_ref} "{PROMPT}"', timeout=5)
-    time.sleep(1)
+        print(f'📥 下载视频...')
+        size = download_video(video_url, filepath)
 
-    print('🚀 点击发送按钮...')
-    cdp_js('''
-        (function() {
-            var btn = document.querySelector('[class*="send-btn-wrapper"]');
-            if (!btn) return 'not found';
-            var rect = btn.getBoundingClientRect();
-            var x = rect.left + rect.width / 2;
-            var y = rect.top + rect.height / 2;
-            var dispatch = function(x, y, type) {
-                var evt = new MouseEvent(type, {bubbles: true, cancelable: true, clientX: x, clientY: y, view: window});
-                document.elementFromPoint(x, y).dispatchEvent(evt);
-            };
-            dispatch(x, y, 'mousedown');
-            dispatch(x, y, 'mouseup');
-            dispatch(x, y, 'click');
-            return 'clicked at ' + Math.round(x) + ',' + Math.round(y);
-        })()
-    ''')
+        if isinstance(size, int):
+            print(f'   ✅ {size//1024//1024}MB → {filename}')
+        else:
+            print(f'   ❌ {size}')
+            sys.exit(1)
 
-    # 等待视频生成
-    video_url = wait_for_video()
-    
-    if not video_url or 'no video' in str(video_url) or 'error' in str(video_url):
-        print(f'❌ 视频获取失败: {video_url}')
-        run(f'screenshot {OUTPUT_DIR}/fail_{int(time.time())}.png', timeout=10)
-        sys.exit(1)
-
-    # 下载视频
-    safe = re.sub(r'[^\w\u4e00-\u9fff\s]', '', PROMPT).strip()[:20] or 'video'
-    ts = int(time.time())
-    filename = f'{safe}_{ts}.mp4'
-    filepath = f'{OUTPUT_DIR}/{filename}'
-    
-    print(f'📥 下载视频...')
-    size = download_video(video_url, filepath)
-    
-    if isinstance(size, int):
-        print(f'   ✅ {size//1024//1024}MB → {filename}')
-    else:
-        print(f'   ❌ {size}')
-        sys.exit(1)
-
-    print()
-    print('=' * 40)
-    print(f'✅ 完成！')
-    print(f'📁 {filepath}')
-    print(f'📝 {PROMPT}')
-    print('=' * 40)
+        print()
+        print('=' * 40)
+        print(f'✅ 完成！')
+        print(f'📁 {filepath}')
+        print(f'📝 {PROMPT}')
+        print('=' * 40)
+    finally:
+        close_other_tabs()
 
 if __name__ == '__main__':
     main()
